@@ -2,7 +2,7 @@
 
 Provides environment variable management and constants for:
 - News API
-- OpenAI API
+- OpenRouter API (LLM)
 - Google Cloud Firestore
 - X (Twitter) API
 """
@@ -41,11 +41,13 @@ NEWS_PAGE_SIZE = 20
 
 
 # ============================================================================
-# OpenAI Configuration
+# OpenRouter Configuration (LLM for Tweet Generation)
 # ============================================================================
 
-OPENAI_API_KEY = get_required_env("OPENAI_API_KEY")
-AI_MODEL = "gpt-4o-mini"  # Change as needed (e.g., "gpt-4-turbo", "gpt-4")
+OPENROUTER_API_KEY = get_required_env("OPENROUTER_API_KEY")
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+# Free tier model - no costs for generation
+OPENROUTER_MODEL = "meta-llama/llama-3.2-3b-instruct:free"
 
 
 # ============================================================================
