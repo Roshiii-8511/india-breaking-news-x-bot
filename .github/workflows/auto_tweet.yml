@@ -33,4 +33,4 @@ jobs:
           GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
           X_CLIENT_ID: ${{ secrets.X_CLIENT_ID }}
     X_CLIENT_SECRET: ${{ secrets.X_CLIENT_SECRET }}
-        run: python -m src.main
+    run: python -m src.main
