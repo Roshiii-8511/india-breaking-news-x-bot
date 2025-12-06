@@ -9,10 +9,12 @@ This module handles:
 
 import logging
 import requests
+import base64
 
 from src.config import (
     X_CLIENT_ID,
     X_OAUTH_TOKEN_URL,
+ X_CLIENT_SECRET,
 )
 from src.token_store import get_refresh_token, update_refresh_token
 
@@ -43,16 +45,26 @@ def refresh_access_token() -> tuple[str, str]:
         logger.info("Retrieving refresh token from Firestore...")
         current_refresh_token = get_refresh_token()
         
-        # Step 2: Prepare request to X OAuth2 endpoint
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-        }
-        body = {
-            "refresh_token": current_refresh_token,
-            "grant_type": "refresh_token",
-            "client_id": X_CLIENT_ID,
-        }
-        
+        # Step 2: Build Basic auth header (client_id:client_secret in base64)
+    creds = f"{X_CLIENT_ID}:{X_CLIENT_SECRET}".encode("utf-8")
+    basic_token = base64.b64encode(creds).decode("utf-8")
+    
+    # Step 3: Prepare headers with Basic auth
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Authorization": f"Basic {basic_token}",
+    }
+    
+    # Step 4: Prepare body (no client_id needed for confidential client)
+    body = {
+        "refresh_token": current_refresh_token,
+        "grant_type": "refresh_token",
+    }
+    
+logger.info(f"Refreshing access token via {X_OAUTH_TOKEN_URL}...")
+    
+    # Step 5: Make POST request
+    response = requests.post(X_OAUTH_TOKEN_URL, headers=headers, data=body)
         logger.info(f"Refreshing access token via {X_OAUTH_TOKEN_URL}...")
         
         # Step 3: Make POST request
