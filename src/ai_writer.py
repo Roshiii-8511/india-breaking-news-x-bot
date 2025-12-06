@@ -1,27 +1,96 @@
-"""AI-powered tweet generation using OpenAI.
+"""AI-powered tweet generation using OpenRouter (free-tier LLM).
 
-This module uses OpenAI's chat completion API to generate:
+This module uses OpenRouter's chat completions API with free-tier models to generate:
 - 5-tweet detailed threads for big stories
 - 1-2 short standalone tweets for supporting stories
 """
 
 import logging
-from openai import OpenAI
+import requests
+from typing import Optional
 
-from src.config import OPENAI_API_KEY, AI_MODEL
+from . import config
 
 
 logger = logging.getLogger(__name__)
 
 
-def get_openai_client() -> OpenAI:
+def _call_openrouter(
+    messages: list[dict],
+    max_tokens: int = 512,
+    temperature: float = 0.7,
+) -> str:
     """
-    Initialize and return OpenAI client.
+    Call OpenRouter chat completions endpoint and return assistant content.
     
+    Args:
+        messages: List of message dicts with 'role' and 'content'
+        max_tokens: Maximum tokens in response
+        temperature: Sampling temperature (0.0-1.0)
+        
     Returns:
-        Initialized OpenAI client
+        The assistant's response text
+        
+    Raises:
+        Exception: If API call fails
     """
-    return OpenAI(api_key=OPENAI_API_KEY)
+    headers = {
+        "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/Roshiii-8511/india-breaking-news-x-bot",
+        "X-Title": "India Breaking News X Bot",
+    }
+    
+    payload = {
+        "model": config.OPENROUTER_MODEL,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    
+    try:
+        logger.info(f"Calling OpenRouter with model {config.OPENROUTER_MODEL}")
+        response = requests.post(
+            config.OPENROUTER_API_URL,
+            json=payload,
+            headers=headers,
+            timeout=30,
+        )
+        
+        if response.status_code not in [200, 201]:
+            logger.error(
+                f"OpenRouter API error {response.status_code}: {response.text}"
+            )
+            raise Exception(
+                f"OpenRouter API failed with status {response.status_code}: {response.text}"
+            )
+        
+        data = response.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        
+        if not content:
+            logger.error(f"No content in OpenRouter response: {data}")
+            raise Exception("OpenRouter returned empty content")
+        
+        logger.info("Successfully called OpenRouter")
+        return content
+        
+    except requests.RequestException as e:
+        logger.error(f"Network error calling OpenRouter: {e}")
+        raise Exception(f"Network error: {e}") from e
+
+
+def _clean_spaces(text: str) -> str:
+    """
+    Normalize spaces in text (remove extra whitespace).
+    
+    Args:
+        text: Input text
+        
+    Returns:
+        Text with normalized whitespace
+    """
+    return " ".join(text.split())
 
 
 def truncate_to_280(text: str) -> str:
@@ -34,6 +103,7 @@ def truncate_to_280(text: str) -> str:
     Returns:
         Text truncated to max 280 chars, with "..." if needed
     """
+    text = text.strip()
     if len(text) <= 280:
         return text
     return text[:277] + "..."
@@ -41,36 +111,38 @@ def truncate_to_280(text: str) -> str:
 
 def generate_thread_for_big_story(big_story: dict) -> list[str]:
     """
-    Generate a 5-tweet thread for the big story using AI.
+    Generate a 5-tweet thread for the big story using OpenRouter.
     
     Args:
-        big_story: Dict with title, description, source, url
+        big_story: Dict with title, description, source, url, publishedAt
         
     Returns:
         List of exactly 5 tweet strings (each <= 280 chars)
         
     Raises:
-        ValueError: If AI response is malformed or generation fails
+        ValueError: If generation fails
     """
     title = big_story.get("title", "")
     description = big_story.get("description", "")
     source = big_story.get("source", {}).get("name", "News")
     url = big_story.get("url", "")
     
-    prompt = f"""You are a professional social media manager for India news.
-    
-Generate a 5-tweet thread about this India news story. Each tweet must:
-- Be exactly 5 tweets separated by a line with just '---'
-- Tweet 1: Breaking news hook with emojis and relevant hashtags
-- Tweet 2: Background and why this matters now
-- Tweet 3: Key details and facts
-- Tweet 4: Impact on Indians
-- Tweet 5: Balanced conclusion and open question
-- Max 280 characters per tweet
-- Tone: Diplomatic, neutral, analytical, India-focused
-- No hate speech, no misinformation, no personal attacks
+    system_prompt = """You are a professional social media manager for India news. 
+Generate exactly 5 tweets for a breaking news story.
+Each tweet must be under 280 characters.
+Separate tweets with a line containing only '---'.
+Format: Tweet text, then ---, then next tweet.
 
-Story:
+Tweet guidelines:
+- Tweet 1: BREAKING hook with relevant emojis and 1-2 hashtags (#India #News etc)
+- Tweet 2: Background and context - why this matters now
+- Tweet 3: Key facts and details changing
+- Tweet 4: Impact on Indians, economy, or daily life
+- Tweet 5: Balanced conclusion and thoughtful question
+
+Tone: diplomatic, neutral, India-focused, analytical. No hate speech, no misinformation, no conspiracy theories."""
+    
+    user_prompt = f"""Breaking News Story:
 Title: {title}
 Description: {description}
 Source: {source}
@@ -79,51 +151,48 @@ URL: {url}
 Generate the 5-tweet thread now:"""
     
     try:
-        client = get_openai_client()
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        
         logger.info(f"Generating 5-tweet thread for: {title[:50]}...")
+        content = _call_openrouter(messages, max_tokens=1000, temperature=0.7)
         
-        response = client.chat.completions.create(
-            model=AI_MODEL,
-            messages=[
-                {"role": "system", "content": "You are a skilled social media manager."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.7,
-            max_tokens=1500,
-        )
+        # Split on '---' separator
+        tweet_parts = content.split("---")
+        tweets = []
         
-        content = response.choices[0].message.content.strip()
-        
-        # Split by '---' separator
-        tweets = content.split("---")
-        tweets = [t.strip() for t in tweets if t.strip()]
-        
-        # Clean up tweet labels if present (e.g., "Tweet 1:", "Tweet 1")
-        cleaned_tweets = []
-        for tweet in tweets:
-            # Remove "Tweet X:" prefix if present
+        for part in tweet_parts:
+            tweet = part.strip()
+            if not tweet:
+                continue
+                
+            # Remove tweet labels like "Tweet 1:" if present
             for i in range(1, 10):
-                if tweet.startswith(f"Tweet {i}:"):
-                    tweet = tweet[len(f"Tweet {i}:"):].strip()
+                prefix = f"Tweet {i}:"
+                if tweet.startswith(prefix):
+                    tweet = tweet[len(prefix):].strip()
                     break
-            # Truncate to 280
+            
+            # Clean and truncate
+            tweet = _clean_spaces(tweet)
             tweet = truncate_to_280(tweet)
-            cleaned_tweets.append(tweet)
+            tweets.append(tweet)
         
-        if len(cleaned_tweets) < 5:
-            logger.warning(
-                f"AI returned {len(cleaned_tweets)} tweets, expected 5. Padding with empty tweets."
-            )
-            while len(cleaned_tweets) < 5:
-                cleaned_tweets.append("")
+        # Ensure exactly 5 tweets
+        if len(tweets) < 5:
+            logger.warning(f"Generated {len(tweets)} tweets, padding to 5")
+            while len(tweets) < 5:
+                tweets.append("More updates as this story develops. #India #News")
         
-        final_tweets = cleaned_tweets[:5]
+        final_tweets = tweets[:5]
         logger.info(f"Generated 5-tweet thread successfully")
         return final_tweets
         
     except Exception as e:
         logger.error(f"Failed to generate thread: {e}")
-        raise ValueError(f"AI generation failed: {e}") from e
+        raise ValueError(f"Tweet generation failed: {e}") from e
 
 
 def generate_short_tweets_for_supporting_stories(
@@ -131,7 +200,7 @@ def generate_short_tweets_for_supporting_stories(
     max_tweets: int = 2,
 ) -> list[str]:
     """
-    Generate short standalone tweets for supporting stories.
+    Generate short standalone tweets for supporting stories using OpenRouter.
     
     Args:
         supporting_stories: List of story dicts
@@ -141,51 +210,65 @@ def generate_short_tweets_for_supporting_stories(
         List of tweet strings (each <= 280 chars)
         
     Raises:
-        ValueError: If AI generation fails
+        ValueError: If generation fails
     """
     if not supporting_stories:
         logger.warning("No supporting stories provided")
         return []
     
+    # Build story summaries
     stories_text = "\n".join([
-        f"- {story.get('title', '')}: {story.get('description', '')[:100]}"
-        for story in supporting_stories[:max_tweets]
+        f"Story {i+1}: {story.get('title', '')[:80]} - {story.get('description', '')[:100]}"
+        for i, story in enumerate(supporting_stories[:max_tweets])
     ])
     
-    prompt = f"""You are a professional social media manager for India news.
-    
-Generate {max_tweets} short, standalone tweets for these India news stories. Each tweet must:
-- Be independent (not part of a thread)
-- Max 280 characters
-- Include 1-2 relevant hashtags
-- Be diplomatic, analytical, India-focused
-- No hate speech, no misinformation
-- Separate each tweet with a line containing only '---'
+    system_prompt = f"""You are a professional social media manager for India news.
+Generate exactly {max_tweets} short, independent tweets for news stories.
+Each tweet must be under 280 characters.
+Separate tweets with a line containing only '---'.
 
-Stories:
+Guidelines:
+- Each tweet is standalone (not part of a thread)
+- Include 1-2 relevant hashtags per tweet
+- Tone: calm, analytical, neutral, India-focused
+- No clickbait, no fake news, no misinformation
+- Be informative and balanced"""
+    
+    user_prompt = f"""Generate {max_tweets} tweets for these news stories:
+
 {stories_text}
 
-Generate {max_tweets} tweets now:"""
+Generate the {max_tweets} tweets now:"""
     
     try:
-        client = get_openai_client()
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        
         logger.info(f"Generating {max_tweets} short tweets for supporting stories")
+        content = _call_openrouter(messages, max_tokens=600, temperature=0.7)
         
-        response = client.chat.completions.create(
-            model=AI_MODEL,
-            messages=[
-                {"role": "system", "content": "You are a skilled social media manager."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.7,
-            max_tokens=800,
-        )
+        # Split on '---'
+        tweet_parts = content.split("---")
+        tweets = []
         
-        content = response.choices[0].message.content.strip()
-        
-        # Split by '---'
-        tweets = content.split("---")
-        tweets = [truncate_to_280(t.strip()) for t in tweets if t.strip()]
+        for part in tweet_parts:
+            tweet = part.strip()
+            if not tweet:
+                continue
+                
+            # Remove tweet labels if present
+            for i in range(1, 10):
+                prefix = f"Tweet {i}:"
+                if tweet.startswith(prefix):
+                    tweet = tweet[len(prefix):].strip()
+                    break
+            
+            # Clean and truncate
+            tweet = _clean_spaces(tweet)
+            tweet = truncate_to_280(tweet)
+            tweets.append(tweet)
         
         # Limit to max_tweets
         final_tweets = tweets[:max_tweets]
@@ -194,4 +277,4 @@ Generate {max_tweets} tweets now:"""
         
     except Exception as e:
         logger.error(f"Failed to generate short tweets: {e}")
-        raise ValueError(f"AI generation failed: {e}") from e
+        raise ValueError(f"Tweet generation failed: {e}") from e
