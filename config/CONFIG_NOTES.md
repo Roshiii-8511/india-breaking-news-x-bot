@@ -11,10 +11,12 @@ This project requires the following environment variables to be set as GitHub Se
 - **How to get**: Sign up at https://newsapi.org and generate an API key
 - **Usage**: Fetches India news headlines for the bot to post
 
-#### 2. `OPENAI_API_KEY`
-- **Description**: API key for OpenAI (for GPT models)
-- **How to get**: Create account at https://openai.com/api and generate an API key
-- **Usage**: Generates tweet content using AI models (gpt-4o-mini or gpt-4-turbo)
+#### 2. `OPENROUTER_API_KEY`
+- **Description**: API key for OpenRouter (free LLM provider)
+- **How to get**: Sign up at https://openrouter.ai and generate an API key
+- **Usage**: Generates tweet content using free-tier models (meta-llama/llama-3.2-3b-instruct:free)
+- **Cost**: Free tier provides ~50 requests/day, sufficient for 2-3 runs/day (1-2 requests per run for tweet generation)
+- **Note**: No credit card required; completely free
 
 #### 3. `GCP_SERVICE_ACCOUNT_KEY`
 - **Description**: Full JSON credentials for a Google Cloud service account with Firestore access
@@ -62,10 +64,20 @@ The workflow file `.github/workflows/auto_tweet.yml` runs the bot on schedule:
 
 Adjust cron times in the workflow file as needed.
 
+## OpenRouter Free-Tier Model
+
+**Model Used**: `meta-llama/llama-3.2-3b-instruct:free`
+
+- **Why Free-Tier**: Completely free with no credit card required
+- **Requests/Day**: ~50 free requests per day
+- **Per Run Cost**: ~1-2 requests (thread + short tweets)
+- **Quality**: Llama 3.2 3B is suitable for news tweet generation with proper prompting
+- **Alternative Models**: You can change the model in `src/config.py` by setting `OPENROUTER_MODEL` to any OpenRouter :free model
+
 ## API Rate Limits
 
 - **News API**: Free tier has 100 requests/day
-- **OpenAI**: Rates depend on your API plan
+- **OpenRouter**: Free tier has ~50 requests/day (sufficient for 2-3 runs/day)
 - **X API**: v2 API limits apply; check Twitter Developer documentation
 - **Firestore**: Free tier supports 50k reads/day
 
@@ -76,4 +88,5 @@ If the bot fails:
 2. Verify all secrets are set correctly
 3. Check Firestore document exists with refresh_token field
 4. Ensure X OAuth2 client has proper permissions
-5. Verify News API and OpenAI keys are active
+5. Verify News API key is active
+6. Verify OpenRouter API key is active and has free-tier access
