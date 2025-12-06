@@ -55,3 +55,77 @@ This document describes the high-level architecture and design of the India Brea
 - API keys and tokens (News API key, X API credentials) are stored as GitHub Actions secrets.
 - No secrets are committed to the repository.
 - Secrets are injected into the environment at runtime.
+
+
+## Token Management Layer
+
+### Overview
+The bot uses OAuth2 refresh tokens to maintain continuous X API access without manual re-authentication. The refresh token is stored in Google Cloud Firestore and automatically rotated on each bot run.
+
+### Architecture
+
+```
+GitHub Actions Workflow
+         ↓
+    main.py
+         ↓
+   x_auth.py (refresh_access_token)
+         ↓
+  [Token Store in Firestore]
+         ↓
+  X OAuth2 Endpoint
+         ↓
+   [Get new access_token + refresh_token]
+         ↓
+  [Save new refresh_token to Firestore]
+         ↓
+  token_store.py (update_refresh_token)
+         ↓
+  [Use access_token for API requests]
+```
+
+### Components
+
+#### 1. `token_store.py`
+- **`get_firestore_client()`**: Initializes Firestore using service account credentials from `GCP_SERVICE_ACCOUNT_KEY` env var
+- **`get_refresh_token()`**: Retrieves current refresh token from Firestore collection `x_tokens`, document `personal_bot`, field `refresh_token`
+- **`update_refresh_token(new_token)`**: Saves new refresh token and updates `updated_at` timestamp
+
+#### 2. `x_auth.py`
+- **`refresh_access_token()`**: 
+  1. Retrieves current refresh_token from Firestore
+  2. POSTs to X OAuth2 token endpoint with refresh_token + client_id + grant_type
+  3. Receives new access_token and new refresh_token
+  4. Saves new refresh_token back to Firestore
+  5. Returns (access_token, new_refresh_token) tuple
+
+### Firestore Schema
+
+```
+Collection: x_tokens
+  Document: personal_bot
+    Fields:
+      - refresh_token: string (rotated on each run)
+      - updated_at: timestamp (updated on each run)
+```
+
+### Initial Setup
+
+1. User creates X app with OAuth2 credentials and gets initial refresh_token
+2. User manually creates Firestore document with initial refresh_token
+3. Bot runs → retrieves token → refreshes it → stores new token
+4. Subsequent runs use updated token from Firestore
+
+### Security Considerations
+
+- Refresh token is **never** committed to repo
+- Stored only in **Firestore** (encrypted at rest)
+- Service account key stored only as **GitHub secret**
+- X OAuth2 uses confidential client credentials
+- Token automatically rotates on each run for reduced exposure window
+
+### Error Handling
+
+- If Firestore document missing: raises `ValueError` with setup instructions
+- If refresh fails (invalid grant): raises `ValueError` telling user to re-authorize
+- If network error: raises `ValueError` with retry guidance
