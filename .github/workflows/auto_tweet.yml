@@ -32,5 +32,5 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}   # 👈 yeh naam secrets me bhi same hona chahiye
           GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
           X_CLIENT_ID: ${{ secrets.X_CLIENT_ID }}
-              X_CLIENT_SECRET: ${{ secrets.X_CLIENT_SECRET }}
+    X_CLIENT_SECRET: ${{ secrets.X_CLIENT_SECRET }}
         run: python -m src.main
