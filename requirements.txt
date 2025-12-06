@@ -1,0 +1,1 @@
+# Dependencies will be added later (e.g., requests, httpx, AI client libraries).
