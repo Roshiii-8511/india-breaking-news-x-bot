@@ -1,1 +1,5 @@
-# Dependencies will be added later (e.g., requests, httpx, AI client libraries).
+requests
+google-cloud-firestore
+google-auth
+openai
+python-dotenv
