@@ -75,6 +75,7 @@ FIRESTORE_DOCUMENT = "personal_bot"
 # ============================================================================
 
 X_CLIENT_ID = get_required_env("X_CLIENT_ID")
+X_CLIENT_SECRET = get_required_env("X_CLIENT_SECRET")
 X_OAUTH_TOKEN_URL = "https://api.x.com/2/oauth2/token"
 X_TWEET_URL = "https://api.x.com/2/tweets"
 
