@@ -1,50 +1,41 @@
 """
-AI tweet writer using OpenRouter free-tier models.
+AI tweet writer using OpenAI (gpt-4o-mini).
 
 Responsibilities:
-- Call OpenRouter chat completions API
+- Call OpenAI chat completions API
 - Generate:
     - 5-tweet thread for a big story
     - 1–2 short standalone tweets for supporting stories
-- Enforce 280 character limit per tweet
+- Enforce conservative character limit per tweet
 """
 
 import logging
-import random
 import re
 from typing import List, Dict
 
-import requests
+from openai import OpenAI
 
-from src.config import (
-    OPENROUTER_API_KEY,
-    OPENROUTER_API_URL,
-    OPENROUTER_MODEL,
-)
+from src.config import OPENAI_API_KEY, OPENAI_MODEL
 
 logger = logging.getLogger(__name__)
 
-# You can tweak / extend this list based on the free models visible in your
-# OpenRouter dashboard.
-FALLBACK_MODELS: List[str] = [
-    OPENROUTER_MODEL,
-    "meta-llama/llama-3.1-8b-instruct:free",
-    "qwen/qwen2.5-7b-instruct:free",
-]
+# Initialize OpenAI client.
+# We pass api_key explicitly, but it will also work if OPENAI_API_KEY
+# is available as an environment variable.
+client = OpenAI(api_key=OPENAI_API_KEY)
 
+# Conservative tweet length so we stay safe even with emoji weighting.
+MAX_TWEET_CHARS = 130
 
-MAX_TWEET_CHARS = 130  # safer for API limits + emoji weighting
 
 def truncate_to_280(text: str) -> str:
     """
     Ensure tweet text is within a conservative length.
 
     - Strip HTML-like tags (e.g. <br>, <b>)
-    - Hard-limit to ~130 chars so even with emoji weighting / URL rules
+    - Hard-limit to ~MAX_TWEET_CHARS chars so even with emoji weighting / URL rules
       we stay under X's effective limit.
     """
-    import re
-
     if text is None:
         return ""
 
@@ -58,7 +49,6 @@ def truncate_to_280(text: str) -> str:
     return text[: MAX_TWEET_CHARS - 3].rstrip() + "..."
 
 
-
 def _clean_spaces(text: str) -> str:
     """Normalize whitespace in tweet text."""
     if not text:
@@ -68,92 +58,35 @@ def _clean_spaces(text: str) -> str:
     return text.strip()
 
 
-def _call_openrouter(
+def _call_openai(
     messages: List[Dict],
     max_tokens: int = 512,
     temperature: float = 0.7,
 ) -> str:
     """
-    Call OpenRouter chat completions endpoint.
+    Call OpenAI chat completions endpoint using the configured model.
 
-    We try primary + fallback free models sequentially:
-      - If a model returns 429 rate-limit, we log and try the next model.
-      - If a model returns any other error, we raise.
+    Returns the content string of the first choice.
+    Raises an Exception if the API call fails.
     """
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        # Optional, nice to have:
-        "HTTP-Referer": "https://github.com/Roshiii-8511/india-breaking-news-x-bot",
-        "X-Title": "India Breaking News X Bot",
-    }
-
-    last_error = None
-
-    for model in FALLBACK_MODELS:
-        logger.info("Calling OpenRouter with model %s", model)
-
-        payload = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
-
-        try:
-            resp = requests.post(
-                OPENROUTER_API_URL,
-                headers=headers,
-                json=payload,
-                timeout=30,
-            )
-        except requests.RequestException as e:
-            logger.error("Network error calling OpenRouter: %s", e)
-            last_error = e
-            continue
-
-        if resp.status_code == 200:
-            data = resp.json()
-            try:
-                content = data["choices"][0]["message"]["content"]
-            except (KeyError, IndexError) as e:
-                logger.error("Unexpected OpenRouter response format: %s", data)
-                last_error = e
-                continue
-            return content
-
-        # Non-200
-        text = resp.text
-        logger.error("OpenRouter API error %s: %s", resp.status_code, text)
-
-        # If it's rate-limited for this free model, try the next model.
-        if resp.status_code == 429 and "rate-limited" in text.lower():
-            logger.warning(
-                "Model %s is rate-limited upstream. Trying next fallback model...",
-                model,
-            )
-            last_error = Exception(
-                f"Model {model} rate-limited: {text}"
-            )
-            continue
-
-        # For other errors (400, 401, etc.), don't waste time on this model.
-        last_error = Exception(
-            f"OpenRouter API failed with status {resp.status_code}: {text}"
+    try:
+        logger.info("Calling OpenAI with model %s", OPENAI_MODEL)
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
         )
-        # Still try next fallback model:
-        continue
-
-    # If we exhausted all models and still failed:
-    if last_error is None:
-        last_error = Exception("Unknown error calling OpenRouter with all models.")
-    raise last_error
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error("OpenAI API call failed: %s", e)
+        raise
 
 
 def _split_tweets_from_response(content: str, expected_count: int = 5) -> List[str]:
     """
     Split LLM response into individual tweets using '---' as delimiter.
-    Clean each tweet and enforce 280 chars.
+    Clean each tweet and enforce MAX_TWEET_CHARS.
     """
     if not content:
         return []
@@ -189,7 +122,7 @@ def _split_tweets_from_response(content: str, expected_count: int = 5) -> List[s
 
 def generate_thread_for_big_story(big_story: Dict) -> List[str]:
     """
-    Generate a 5-tweet thread for the big story using OpenRouter.
+    Generate a 5-tweet thread for the big story using OpenAI.
 
     big_story dict fields:
       - title
@@ -212,7 +145,7 @@ def generate_thread_for_big_story(big_story: Dict) -> List[str]:
         "- Tone: calm, neutral, diplomatic, analytical.\n"
         "- No hate speech, no personal attacks, no conspiracy, no unverified claims.\n"
         "- Write in simple, clear English with occasional emojis.\n"
-        "- Each tweet must be under 280 characters.\n"
+        "- Each tweet must be under 280 characters (we will truncate further).\n"
         "- Output exactly 5 tweets, separated by a line containing only '---'.\n"
         "- Do NOT number the tweets explicitly.\n"
         "- Use 1–2 relevant hashtags per tweet.\n"
@@ -241,7 +174,7 @@ def generate_thread_for_big_story(big_story: Dict) -> List[str]:
     ]
 
     try:
-        content = _call_openrouter(messages, max_tokens=800, temperature=0.7)
+        content = _call_openai(messages, max_tokens=800, temperature=0.7)
     except Exception as e:
         logger.error("Failed to generate thread: %s", e)
         raise ValueError(f"Tweet generation failed: {e}") from e
@@ -260,7 +193,7 @@ def generate_short_tweets_for_supporting_stories(
 
     Each tweet:
       - Focuses on a different story
-      - < 280 chars
+      - < MAX_TWEET_CHARS chars (after truncation)
       - Has 1–2 relevant hashtags
       - Neutral, diplomatic, India-focused tone
     """
@@ -285,7 +218,7 @@ def generate_short_tweets_for_supporting_stories(
         "Rules:\n"
         "- Tone: calm, neutral, analytical, diplomatic.\n"
         "- No hate speech or personal attacks.\n"
-        "- Each tweet must be under 280 characters.\n"
+        "- Each tweet must be under 280 characters (we will truncate further).\n"
         "- Each tweet should mention the core point of the story.\n"
         "- Use 1–2 relevant hashtags like #India, #Economy, #Policy, etc.\n"
         "- Output one tweet per story, separated by a line containing only '---'.\n"
@@ -307,7 +240,7 @@ def generate_short_tweets_for_supporting_stories(
     ]
 
     try:
-        content = _call_openrouter(messages, max_tokens=600, temperature=0.7)
+        content = _call_openai(messages, max_tokens=600, temperature=0.7)
     except Exception as e:
         logger.error("Failed to generate short tweets: %s", e)
         # For supporting tweets, we can fail softly and just return empty list
