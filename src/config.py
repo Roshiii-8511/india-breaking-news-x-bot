@@ -2,12 +2,13 @@
 
 Provides environment variable management and constants for:
 - News API
-- OpenAI API (LLM)
+- Gemini API (LLM)
 - Google Cloud Firestore
 - X (Twitter) API
 """
 import os
 import json
+
 
 def get_required_env(name: str) -> str:
     """
@@ -27,6 +28,7 @@ def get_required_env(name: str) -> str:
         raise ValueError(f"Required environment variable '{name}' is not set")
     return value
 
+
 # ============================================================================
 # News API Configuration
 # ============================================================================
@@ -35,12 +37,18 @@ NEWS_API_URL = "https://newsapi.org/v2/top-headlines"
 NEWS_COUNTRY = "in"
 NEWS_PAGE_SIZE = 20
 
+# Only consider very recent news (in hours) — used in news_client.py
+NEWS_MAX_AGE_HOURS = 24
+
+
 # ============================================================================
-# OpenAI Configuration (LLM for Tweet Generation)
+# Gemini Configuration (LLM for Tweet Generation)
 # ============================================================================
-OPENAI_API_KEY = get_required_env("OPENAI_API_KEY")
-# Using gpt-4o-mini for cost-effective and fast tweet generation
-OPENAI_MODEL = "gpt-4o-mini"
+# We use Google Generative AI (Gemini) instead of OpenAI for tweet generation.
+GEMINI_API_KEY = get_required_env("GEMINI_API_KEY")
+# Cost-efficient, fast model suitable for short text generation.
+GEMINI_MODEL = "gemini-1.5-flash"
+
 
 # ============================================================================
 # Google Cloud Firestore Configuration
@@ -60,6 +68,7 @@ except json.JSONDecodeError as e:
 FIRESTORE_COLLECTION = "x_tokens"
 FIRESTORE_DOCUMENT = "personal_bot"
 
+
 # ============================================================================
 # X (Twitter) API Configuration
 # ============================================================================
@@ -67,6 +76,7 @@ X_CLIENT_ID = get_required_env("X_CLIENT_ID")
 X_CLIENT_SECRET = get_required_env("X_CLIENT_SECRET")
 X_OAUTH_TOKEN_URL = "https://api.x.com/2/oauth2/token"
 X_TWEET_URL = "https://api.x.com/2/tweets"
+
 
 # ============================================================================
 # Logging & Debugging
