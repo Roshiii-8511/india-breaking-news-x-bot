@@ -33,14 +33,30 @@ FALLBACK_MODELS: List[str] = [
 ]
 
 
+MAX_TWEET_CHARS = 130  # safer for API limits + emoji weighting
+
 def truncate_to_280(text: str) -> str:
-    """Ensure tweet text is within 280 characters."""
+    """
+    Ensure tweet text is within a conservative length.
+
+    - Strip HTML-like tags (e.g. <br>, <b>)
+    - Hard-limit to ~130 chars so even with emoji weighting / URL rules
+      we stay under X's effective limit.
+    """
+    import re
+
     if text is None:
         return ""
+
+    # Remove simple HTML tags if model adds any
+    text = re.sub(r"<[^>]+>", "", text)
+
     text = text.strip()
-    if len(text) <= 280:
+    if len(text) <= MAX_TWEET_CHARS:
         return text
-    return text[:277].rstrip() + "..."
+
+    return text[: MAX_TWEET_CHARS - 3].rstrip() + "..."
+
 
 
 def _clean_spaces(text: str) -> str:
