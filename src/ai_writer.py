@@ -1,109 +1,110 @@
 """
-AI tweet writer using Google Gemini 2.5 Flash.
+AI tweet writer using Google Gemini (google-genai SDK).
 
 Responsibilities:
-- Call Gemini chat API (via google-genai SDK)
+- Call Gemini (google-genai) generate_content API
 - Generate:
     - 5-tweet thread for a big story
     - 1–2 short standalone tweets for supporting stories
 - Enforce conservative character limit per tweet
+- Provide safe fallback thread if model fails
 """
-
 import logging
 import re
 from typing import List, Dict
 
 from google import genai
+from google.genai import errors as genai_errors
 
-from src.config import GEMINI_API_KEY, GEMINI_MODEL
+from src.config import (
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
+    GEMINI_MAX_TOKENS_THREAD,
+    GEMINI_MAX_TOKENS_SHORT,
+)
 
 logger = logging.getLogger(__name__)
 
-# Configure Gemini client once at import time.
-genai.configure(api_key=GEMINI_API_KEY)
-_model = genai.GenerativeModel(GEMINI_MODEL)
+# Create genai client (sync)
+# The new google-genai SDK uses Client(api_key=...), not configure(...)
+try:
+    client = genai.Client(api_key=GEMINI_API_KEY)
+except Exception as e:
+    # in CI / testing the constructor should work; log but continue to allow clearer errors later
+    logger.exception("Failed to initialize genai.Client: %s", e)
+    client = None
 
-# Conservative tweet length so we stay safe even with emoji weighting.
-MAX_TWEET_CHARS = 130
+# Conservative tweet length so we stay safe (leaves buffer for emoji/urls)
+MAX_TWEET_CHARS = 260
 
 
-def truncate_to_280(text: str) -> str:
-    """
-    Ensure tweet text is within a conservative length.
-
-    - Strip HTML-like tags (e.g. <br>, <b>)
-    - Hard-limit to ~MAX_TWEET_CHARS chars so even with emoji weighting / URL rules
-      we stay under X's effective limit.
-    """
+def truncate_to_limit(text: str, limit: int = MAX_TWEET_CHARS) -> str:
+    """Trim text to a safe length and clean simple HTML tags."""
     if text is None:
         return ""
-
-    # Remove simple HTML tags if model adds any
     text = re.sub(r"<[^>]+>", "", text)
-
     text = text.strip()
-    if len(text) <= MAX_TWEET_CHARS:
+    if len(text) <= limit:
         return text
-
-    return text[: MAX_TWEET_CHARS - 3].rstrip() + "..."
+    return text[: limit - 3].rstrip() + "..."
 
 
 def _clean_spaces(text: str) -> str:
-    """Normalize whitespace in tweet text."""
     if not text:
         return ""
-    # Collapse multiple spaces and strip
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
-def _messages_to_prompt(messages: List[Dict]) -> str:
-    """
-    Convert OpenAI-style messages (role/content) into a single text prompt
-    suitable for Gemini generate_content.
-    """
-    parts: List[str] = []
-    for m in messages:
-        role = (m.get("role") or "user").lower()
-        content = m.get("content") or ""
-
-        if role == "system":
-            prefix = "SYSTEM"
-        elif role == "assistant":
-            prefix = "ASSISTANT"
-        else:
-            prefix = "USER"
-
-        parts.append(f"{prefix}: {content}")
-
-    # Separate blocks with blank lines for readability
-    return "\n\n".join(parts)
-
-
 def _call_gemini(
-    messages: List[Dict],
-    max_output_tokens: int = 350,
+    prompt: str,
+    max_output_tokens: int = 300,
     temperature: float = 0.7,
 ) -> str:
     """
-    Call Gemini 2.5 Flash via google-genai SDK.
-
-    Returns the response text.
-    Raises an Exception if the API call fails.
+    Call Gemini via google-genai SDK client. Returns the generated text (string).
+    Raises Exception on permanent failure.
     """
-    prompt = _messages_to_prompt(messages)
+    if client is None:
+        raise RuntimeError("Gemini client not initialized")
 
     try:
-        logger.info("Calling Gemini with model %s", GEMINI_MODEL)
-        response = _model.generate_content(
-            prompt,
-            generation_config={
-                "max_output_tokens": max_output_tokens,
-                "temperature": temperature,
-            },
+        logger.info("Calling Gemini with model %s (max_tokens=%d)", GEMINI_MODEL, max_output_tokens)
+        # The SDK's generate_content returns an object with .text or .response depending on version.
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            max_output_tokens=max_output_tokens,
+            temperature=temperature,
         )
-        # For text-only responses, .text is the main field.
-        return response.text or ""
+        # SDK exposes response.text in examples
+        # Some SDK versions use response.output[0].content — prefer .text if present
+        if hasattr(response, "text") and response.text:
+            return response.text
+        # fallback checks
+        try:
+            # response.parts / response.output style
+            if getattr(response, "output", None):
+                parts = response.output
+                # join text parts if available
+                text_parts = []
+                for p in parts:
+                    if hasattr(p, "text"):
+                        text_parts.append(p.text)
+                    elif isinstance(p, dict) and p.get("content"):
+                        text_parts.append(p["content"])
+                if text_parts:
+                    return "\n".join(text_parts)
+        except Exception:
+            pass
+
+        # Last resort: stringify entire response
+        logger.warning("Gemini response did not contain .text; returning str(response)")
+        return str(response)
+
+    except genai_errors.APIError as e:
+        logger.error("Gemini APIError: %s", e)
+        raise
     except Exception as e:
         logger.error("Gemini API call failed: %s", e)
         raise
@@ -111,51 +112,40 @@ def _call_gemini(
 
 def _split_tweets_from_response(content: str, expected_count: int = 5) -> List[str]:
     """
-    Split LLM response into individual tweets using '---' as delimiter.
-    Clean each tweet and enforce MAX_TWEET_CHARS.
+    Split model output into tweets using '---' delimiter. Clean & truncate.
     """
     if not content:
         return []
 
-    # Split on lines that contain only --- or surrounded by whitespace
     parts = re.split(r"\n\s*---\s*\n", content.strip())
     cleaned: List[str] = []
-
     for part in parts:
         txt = part.strip()
-
-        # Remove "Tweet 1:", "1.", etc. if model added:
         txt = re.sub(r"^Tweet\s*\d+:\s*", "", txt, flags=re.IGNORECASE)
         txt = re.sub(r"^\d+\.\s*", "", txt)
-
         txt = _clean_spaces(txt)
-        txt = truncate_to_280(txt)
-
+        txt = truncate_to_limit(txt)
         if txt:
             cleaned.append(txt)
 
-    # Ensure at least expected_count items (pad with generic tweets if needed)
     while len(cleaned) < expected_count:
-        cleaned.append(
-            truncate_to_280(
-                "More updates on this story soon. #India #News"
-            )
-        )
+        cleaned.append(truncate_to_limit("More updates on this story soon. #India #News"))
 
-    # If too many, keep only first expected_count
     return cleaned[:expected_count]
+
+
+FALLBACK_THREAD = [
+    "🔔 Breaking: We are monitoring a developing story. More verified updates soon. #India #News",
+    "We are following official sources and will share key facts when available.",
+    "We'll summarise verified impact and what it means for citizens & policy.",
+    "If you have trusted sources, reply with links — we will review and cite them.",
+    "Follow for real-time, verified updates. We avoid rumours. #TrustworthyNews",
+]
 
 
 def generate_thread_for_big_story(big_story: Dict) -> List[str]:
     """
-    Generate a 5-tweet thread for the big story using Gemini.
-
-    big_story dict fields:
-      - title
-      - description
-      - url
-      - source (dict with 'name')
-      - publishedAt
+    Generate 5-tweet thread for a big story using Gemini. On failure, return FALLBACK_THREAD.
     """
     title = big_story.get("title", "") or ""
     description = big_story.get("description", "") or ""
@@ -171,9 +161,8 @@ def generate_thread_for_big_story(big_story: Dict) -> List[str]:
         "- Tone: calm, neutral, diplomatic, analytical.\n"
         "- No hate speech, no personal attacks, no conspiracy, no unverified claims.\n"
         "- Write in simple, clear English with occasional emojis.\n"
-        "- Each tweet must be under 280 characters (we will truncate further).\n"
+        "- Each tweet must be under 280 characters.\n"
         "- Output exactly 5 tweets, separated by a line containing only '---'.\n"
-        "- Do NOT number the tweets explicitly.\n"
         "- Use 1–2 relevant hashtags per tweet.\n"
     )
 
@@ -194,19 +183,17 @@ def generate_thread_for_big_story(big_story: Dict) -> List[str]:
         "---"
     )
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
+    prompt = system_prompt + "\n\n" + user_prompt
 
     try:
-        content = _call_gemini(messages, max_output_tokens=350, temperature=0.7)
+        content = _call_gemini(prompt, max_output_tokens=GEMINI_MAX_TOKENS_THREAD, temperature=0.65)
     except Exception as e:
         logger.error("Failed to generate thread: %s", e)
-        raise ValueError(f"Tweet generation failed: {e}") from e
+        logger.info("Returning fallback thread.")
+        return FALLBACK_THREAD
 
     tweets = _split_tweets_from_response(content, expected_count=5)
-    logger.info("Generated 5-tweet thread.")
+    logger.info("Generated %d tweets from Gemini.", len(tweets))
     return tweets
 
 
@@ -215,61 +202,42 @@ def generate_short_tweets_for_supporting_stories(
     max_tweets: int = 2,
 ) -> List[str]:
     """
-    Generate up to `max_tweets` standalone tweets about supporting stories.
-
-    Each tweet:
-      - Focuses on a different story
-      - < MAX_TWEET_CHARS chars (after truncation)
-      - Has 1–2 relevant hashtags
-      - Neutral, diplomatic, India-focused tone
+    Generate up to `max_tweets` short tweets for supporting stories.
     """
     if not supporting_stories or max_tweets <= 0:
         return []
 
     stories_for_prompt = supporting_stories[:max_tweets]
-
     formatted_stories = []
     for idx, story in enumerate(stories_for_prompt, start=1):
         t = story.get("title", "") or ""
         d = story.get("description", "") or ""
         s = (story.get("source") or {}).get("name", "") or ""
-        formatted_stories.append(
-            f"{idx}) Title: {t}\nDescription: {d}\nSource: {s}"
-        )
-
-    stories_block = "\n\n".join(formatted_stories)
+        formatted_stories.append(f"{idx}) Title: {t}\nDescription: {d}\nSource: {s}")
 
     system_prompt = (
         "You are an assistant that writes India-focused X (Twitter) posts.\n"
         "Rules:\n"
         "- Tone: calm, neutral, analytical, diplomatic.\n"
         "- No hate speech or personal attacks.\n"
-        "- Each tweet must be under 280 characters (we will truncate further).\n"
+        "- Each tweet must be under 280 characters.\n"
         "- Each tweet should mention the core point of the story.\n"
         "- Use 1–2 relevant hashtags like #India, #Economy, #Policy, etc.\n"
-        "- Output one tweet per story, separated by a line containing only '---'.\n"
-        "- Do NOT number the tweets."
+        "- Output one tweet per story, separated by a line containing only '---'."
     )
 
     user_prompt = (
         "Write short standalone tweets for the following India-related news stories.\n\n"
-        f"{stories_block}\n\n"
-        "Output:\n"
-        f"- {max_tweets} tweets maximum (one per story).\n"
-        "- Separate tweets with a line that contains only:\n"
-        "---"
+        f"{'\n\n'.join(formatted_stories)}\n\n"
+        "Output:\n- Up to {max_tweets} tweets, separated by a line of '---'."
     )
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
+    prompt = system_prompt + "\n\n" + user_prompt
 
     try:
-        content = _call_gemini(messages, max_output_tokens=260, temperature=0.7)
+        content = _call_gemini(prompt, max_output_tokens=GEMINI_MAX_TOKENS_SHORT, temperature=0.6)
     except Exception as e:
         logger.error("Failed to generate short tweets: %s", e)
-        # For supporting tweets, we can fail softly and just return empty list
         return []
 
     tweets = _split_tweets_from_response(content, expected_count=max_tweets)
