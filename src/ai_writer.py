@@ -1,8 +1,8 @@
 """
-AI tweet writer using Google Gemini (gemini-1.5-flash).
+AI tweet writer using Google Gemini 2.5 Flash.
 
 Responsibilities:
-- Call Gemini Generative AI API
+- Call Gemini chat API (via google-genai SDK)
 - Generate:
     - 5-tweet thread for a big story
     - 1–2 short standalone tweets for supporting stories
@@ -13,15 +13,15 @@ import logging
 import re
 from typing import List, Dict
 
-import google.generativeai as genai
+from google import genai
 
 from src.config import GEMINI_API_KEY, GEMINI_MODEL
 
 logger = logging.getLogger(__name__)
 
-# Configure Gemini client
+# Configure Gemini client once at import time.
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel(GEMINI_MODEL)
+_model = genai.GenerativeModel(GEMINI_MODEL)
 
 # Conservative tweet length so we stay safe even with emoji weighting.
 MAX_TWEET_CHARS = 130
@@ -57,53 +57,53 @@ def _clean_spaces(text: str) -> str:
     return text.strip()
 
 
+def _messages_to_prompt(messages: List[Dict]) -> str:
+    """
+    Convert OpenAI-style messages (role/content) into a single text prompt
+    suitable for Gemini generate_content.
+    """
+    parts: List[str] = []
+    for m in messages:
+        role = (m.get("role") or "user").lower()
+        content = m.get("content") or ""
+
+        if role == "system":
+            prefix = "SYSTEM"
+        elif role == "assistant":
+            prefix = "ASSISTANT"
+        else:
+            prefix = "USER"
+
+        parts.append(f"{prefix}: {content}")
+
+    # Separate blocks with blank lines for readability
+    return "\n\n".join(parts)
+
+
 def _call_gemini(
     messages: List[Dict],
-    max_output_tokens: int = 400,
+    max_output_tokens: int = 350,
     temperature: float = 0.7,
 ) -> str:
     """
-    Call Gemini (Google Generative AI) using the configured model.
+    Call Gemini 2.5 Flash via google-genai SDK.
 
-    We accept OpenAI-style `messages` (list of {role, content}) and:
-    - Combine system messages + user messages into a single prompt string.
-    - Use model.generate_content with a compact token limit to control cost.
-    - Return the plain text content.
+    Returns the response text.
+    Raises an Exception if the API call fails.
     """
-    # Split system vs user parts
-    system_parts = []
-    user_parts = []
-    for m in messages:
-        role = m.get("role")
-        content = m.get("content", "")
-        if role == "system":
-            system_parts.append(content)
-        elif role == "user":
-            user_parts.append(content)
-        else:
-            user_parts.append(content)
-
-    system_text = "\n\n".join(system_parts).strip()
-    user_text = "\n\n".join(user_parts).strip()
-
-    if system_text:
-        full_prompt = f"System instructions:\n{system_text}\n\nUser request:\n{user_text}"
-    else:
-        full_prompt = user_text
+    prompt = _messages_to_prompt(messages)
 
     try:
         logger.info("Calling Gemini with model %s", GEMINI_MODEL)
-        response = model.generate_content(
-            full_prompt,
+        response = _model.generate_content(
+            prompt,
             generation_config={
                 "max_output_tokens": max_output_tokens,
                 "temperature": temperature,
             },
         )
-        # Gemini Python client gives .text for combined output
-        if not response or not getattr(response, "text", None):
-            raise RuntimeError("Gemini returned empty or blocked content.")
-        return response.text
+        # For text-only responses, .text is the main field.
+        return response.text or ""
     except Exception as e:
         logger.error("Gemini API call failed: %s", e)
         raise
@@ -200,7 +200,7 @@ def generate_thread_for_big_story(big_story: Dict) -> List[str]:
     ]
 
     try:
-        content = _call_gemini(messages, max_output_tokens=400, temperature=0.7)
+        content = _call_gemini(messages, max_output_tokens=350, temperature=0.7)
     except Exception as e:
         logger.error("Failed to generate thread: %s", e)
         raise ValueError(f"Tweet generation failed: {e}") from e
@@ -266,7 +266,7 @@ def generate_short_tweets_for_supporting_stories(
     ]
 
     try:
-        content = _call_gemini(messages, max_output_tokens=300, temperature=0.7)
+        content = _call_gemini(messages, max_output_tokens=260, temperature=0.7)
     except Exception as e:
         logger.error("Failed to generate short tweets: %s", e)
         # For supporting tweets, we can fail softly and just return empty list
