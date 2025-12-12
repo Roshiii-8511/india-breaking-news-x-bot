@@ -44,10 +44,12 @@ NEWS_MAX_AGE_HOURS = 24
 # ============================================================================
 # Gemini Configuration (LLM for Tweet Generation)
 # ============================================================================
-# We use Google Generative AI (Gemini) instead of OpenAI for tweet generation.
+# Gemini API key is stored as an environment variable / GitHub secret.
 GEMINI_API_KEY = get_required_env("GEMINI_API_KEY")
-# Cost-efficient, fast model suitable for short text generation.
-GEMINI_MODEL = "gemini-1.5-flash"
+
+# Use the latest fast, low-cost model for text generation.
+# This must match the Gemini 2.5 Flash model ID.
+GEMINI_MODEL = "gemini-2.5-flash"
 
 
 # ============================================================================
