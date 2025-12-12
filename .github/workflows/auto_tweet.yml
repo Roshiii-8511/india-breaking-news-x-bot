@@ -27,13 +27,11 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run India Breaking News Bot
-              - name: Run India Breaking News Bot
         env:
           NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }} # optional: set in repo secrets or workflow variables
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
           GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
           X_CLIENT_ID: ${{ secrets.X_CLIENT_ID }}
           X_CLIENT_SECRET: ${{ secrets.X_CLIENT_SECRET }}
         run: python -m src.main
-
