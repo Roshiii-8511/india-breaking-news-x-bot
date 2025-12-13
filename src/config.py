@@ -31,13 +31,13 @@ NEWS_MAX_AGE_HOURS = int(os.getenv("NEWS_MAX_AGE_HOURS", "24"))
 # Gemini / Google GenAI Configuration
 # ======================================================================
 # Use GEMINI_API_KEY (from GitHub Secrets). This key is for the Gemini Developer API.
-GEMINI_API_KEY = get_required_env("GEMINI_API_KEY")
-# Default model — change if you want another model available to your account
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+# Add near other LLM config
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or ""   # required in production; empty ok for dev
+GEMINI_MODEL = os.getenv("GEMINI_MODEL") or "gemini-2.5-flash"
+# token limits to control cost
+GEMINI_MAX_TOKENS_THREAD = int(os.getenv("GEMINI_MAX_TOKENS_THREAD") or 400)
+GEMINI_MAX_TOKENS_SHORT = int(os.getenv("GEMINI_MAX_TOKENS_SHORT") or 300)
 
-# Conservative token limits (keeps cost down)
-GEMINI_MAX_TOKENS_THREAD = int(os.getenv("GEMINI_MAX_TOKENS_THREAD", "400"))
-GEMINI_MAX_TOKENS_SHORT = int(os.getenv("GEMINI_MAX_TOKENS_SHORT", "220"))
 
 # ======================================================================
 # Google Cloud Firestore Configuration (token store)
