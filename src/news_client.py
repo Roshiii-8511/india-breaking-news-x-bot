@@ -1,182 +1,105 @@
 """
-News API client for fetching India news.
-
-This module handles:
-- Fetching India-related news from NewsAPI (/v2/everything)
-- Filtering and sorting by date
-- Selecting 1 big story + 2-3 supporting stories
+News API client for fetching India-focused breaking news.
 """
 
 import logging
-from datetime import datetime
-from typing import List, Dict, Tuple
-
+from datetime import datetime, timedelta, timezone
 import requests
 
-from src.config import NEWS_API_KEY, NEWS_API_URL, NEWS_PAGE_SIZE
+from src.config import (
+    NEWS_API_KEY,
+    NEWS_API_URL,
+    NEWS_COUNTRY,
+    NEWS_PAGE_SIZE,
+    NEWS_MAX_AGE_HOURS,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def fetch_top_headlines() -> List[Dict]:
-    """
-    Fetch India-related news from News API using the /v2/everything endpoint.
+INDIA_KEYWORDS = [
+    "india", "indian", "delhi", "mumbai", "bihar", "uttar pradesh",
+    "supreme court", "parliament", "government of india",
+    "modi", "cabinet", "election commission", "rbi",
+]
 
-    We no longer rely on `top-headlines?country=in` because that can return
-    0 results on some free-tier setups. Instead we use a keyword search:
 
-        q = "India"
-        language = "en"
-        sortBy = "publishedAt"
-
-    Args:
-        None
-
-    Returns:
-        List of article dicts, each with:
-            - title: str
-            - description: str
-            - url: str
-            - source: dict with 'name' key
-            - publishedAt: str (ISO datetime)
-
-    Raises:
-        ValueError: If API request fails or NewsAPI returns an error.
-    """
+def _is_recent(published_at: str) -> bool:
     try:
-        params = {
-            # Keyword-based search focused on India
-            "q": "India",
-            "language": "en",
-            "sortBy": "publishedAt",
-            "pageSize": NEWS_PAGE_SIZE,
-            "apiKey": NEWS_API_KEY,
+        dt = datetime.fromisoformat(published_at.replace("Z", "")).replace(
+            tzinfo=timezone.utc
+        )
+        return dt >= datetime.now(timezone.utc) - timedelta(hours=NEWS_MAX_AGE_HOURS)
+    except Exception:
+        return False
+
+
+def _is_india_relevant(article: dict) -> bool:
+    text = f"{article.get('title', '')} {article.get('description', '')}".lower()
+    return any(k in text for k in INDIA_KEYWORDS)
+
+
+def fetch_top_headlines() -> list[dict]:
+    params = {
+        "country": NEWS_COUNTRY,
+        "pageSize": NEWS_PAGE_SIZE,
+        "apiKey": NEWS_API_KEY,
+    }
+
+    logger.info(f"Fetching India news from {NEWS_API_URL}...")
+    response = requests.get(NEWS_API_URL, params=params, timeout=15)
+
+    if response.status_code != 200:
+        raise ValueError(
+            f"News API error {response.status_code}: {response.text}"
+        )
+
+    data = response.json()
+    articles = data.get("articles", [])
+
+    logger.info(f"Retrieved {len(articles)} raw articles from News API")
+
+    cleaned = []
+    for a in articles:
+        article = {
+            "title": a.get("title", ""),
+            "description": a.get("description", ""),
+            "url": a.get("url", ""),
+            "source": a.get("source", {}),
+            "publishedAt": a.get("publishedAt", ""),
         }
 
-        logger.info(f"Fetching India news from {NEWS_API_URL}...")
-        response = requests.get(NEWS_API_URL, params=params, timeout=30)
+        if not article["title"]:
+            continue
+        if not _is_recent(article["publishedAt"]):
+            continue
+        if not _is_india_relevant(article):
+            continue
 
-        if response.status_code != 200:
-            logger.error(
-                "News API returned status %s: %s",
-                response.status_code,
-                response.text,
-            )
-            raise ValueError(
-                f"Failed to fetch news. Status: {response.status_code}. "
-                f"Response: {response.text}"
-            )
+        cleaned.append(article)
 
-        data = response.json()
+    logger.info(f"India + fresh articles after filter: {len(cleaned)}")
 
-        # NewsAPI sometimes returns {"status": "error", "code": "...", "message": "..."}
-        status = data.get("status")
-        if status != "ok":
-            code = data.get("code")
-            message = data.get("message")
-            logger.error(
-                "News API error. status=%s, code=%s, message=%s",
-                status,
-                code,
-                message,
-            )
-            raise ValueError(f"News API error: {code} - {message}")
+    if not cleaned:
+        raise ValueError("No recent India-relevant articles found")
 
-        articles = data.get("articles", [])
-        logger.info("Retrieved %d articles from News API", len(articles))
-
-        simplified: List[Dict] = []
-        for article in articles:
-            simplified.append(
-                {
-                    "title": article.get("title", "No title"),
-                    "description": article.get("description", "") or "",
-                    "url": article.get("url", ""),
-                    "source": article.get("source", {}) or {},
-                    "publishedAt": article.get("publishedAt", "") or "",
-                }
-            )
-
-        return simplified
-
-    except requests.RequestException as e:
-        logger.error("Network error fetching news: %s", e)
-        raise ValueError(f"Network error fetching news: {e}") from e
-    except Exception as e:
-        logger.error("Unexpected error fetching news: %s", e)
-        raise
+    return cleaned
 
 
 def select_big_and_supporting_stories(
-    articles: List[Dict],
-) -> Tuple[Dict, List[Dict]]:
-    """
-    Select 1 big story and 2-3 supporting stories from article list.
+    articles: list[dict],
+) -> tuple[dict, list[dict]]:
 
-    Strategy:
-        - Sort by publishedAt (most recent first)
-        - Take first as big story
-        - From remaining, pick 2-3 from different sources if possible
+    articles = sorted(
+        articles,
+        key=lambda x: x.get("publishedAt", ""),
+        reverse=True,
+    )
 
-    Args:
-        articles: List of article dicts from fetch_top_headlines
+    big_story = articles[0]
+    supporting = articles[1:3]
 
-    Returns:
-        Tuple of (big_story_dict, supporting_stories_list)
+    logger.info(f"Selected big story: {big_story['title'][:80]}...")
+    logger.info(f"Selected {len(supporting)} supporting stories")
 
-    Raises:
-        ValueError: If list is empty.
-    """
-    if not articles:
-        raise ValueError("No articles available to select stories from")
-
-    try:
-        def _parse_ts(ts: str) -> str:
-            # publishedAt is ISO like "2025-12-05T15:37:33Z"
-            # Lexicographic sort on ISO strings works fine for our case,
-            # but we normalize missing/empty to "".
-            return ts or ""
-
-        # Sort by publishedAt descending (most recent first)
-        sorted_articles = sorted(
-            articles,
-            key=lambda x: _parse_ts(x.get("publishedAt", "")),
-            reverse=True,
-        )
-
-        big_story = sorted_articles[0]
-        logger.info("Selected big story: %s...", big_story.get("title", "")[:80])
-
-        # Select 2-3 supporting stories from different sources
-        supporting_stories: List[Dict] = []
-        seen_sources = {big_story.get("source", {}).get("name", "")}
-
-        for article in sorted_articles[1:]:
-            if len(supporting_stories) >= 3:
-                break
-
-            title = article.get("title") or ""
-            desc = article.get("description") or ""
-            if not title.strip() or not desc.strip():
-                continue
-
-            source_name = article.get("source", {}).get("name", "")
-
-            # Prefer different sources, but allow same source if we still need more
-            if source_name and source_name not in seen_sources:
-                supporting_stories.append(article)
-                seen_sources.add(source_name)
-            elif len(supporting_stories) < 2:
-                supporting_stories.append(article)
-
-        if not supporting_stories:
-            # Fallback: just take the next 2 most recent
-            supporting_stories = sorted_articles[1:3]
-
-        logger.info("Selected %d supporting stories", len(supporting_stories))
-
-        return big_story, supporting_stories
-
-    except Exception as e:
-        logger.error("Error selecting stories: %s", e)
-        raise
+    return big_story, supporting
