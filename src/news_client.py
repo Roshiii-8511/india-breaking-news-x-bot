@@ -1,5 +1,6 @@
 """
-News API client for fetching India-focused breaking news.
+News API client with SAFE fallback logic.
+Bot will NEVER die due to empty news.
 """
 
 import logging
@@ -16,11 +17,10 @@ from src.config import (
 
 logger = logging.getLogger(__name__)
 
-
 INDIA_KEYWORDS = [
     "india", "indian", "delhi", "mumbai", "bihar", "uttar pradesh",
-    "supreme court", "parliament", "government of india",
-    "modi", "cabinet", "election commission", "rbi",
+    "supreme court", "parliament", "government", "rbi",
+    "modi", "cabinet", "election", "court",
 ]
 
 
@@ -35,31 +35,42 @@ def _is_recent(published_at: str) -> bool:
 
 
 def _is_india_relevant(article: dict) -> bool:
-    text = f"{article.get('title', '')} {article.get('description', '')}".lower()
+    text = f"{article.get('title','')} {article.get('description','')}".lower()
     return any(k in text for k in INDIA_KEYWORDS)
 
 
+def _fetch(params: dict) -> list[dict]:
+    r = requests.get(NEWS_API_URL, params=params, timeout=15)
+    if r.status_code != 200:
+        return []
+    return r.json().get("articles", [])
+
+
 def fetch_top_headlines() -> list[dict]:
-    params = {
+    logger.info(f"Fetching India news from {NEWS_API_URL}...")
+
+    # 1️⃣ Primary: country=in
+    articles = _fetch({
         "country": NEWS_COUNTRY,
         "pageSize": NEWS_PAGE_SIZE,
         "apiKey": NEWS_API_KEY,
-    }
-
-    logger.info(f"Fetching India news from {NEWS_API_URL}...")
-    response = requests.get(NEWS_API_URL, params=params, timeout=15)
-
-    if response.status_code != 200:
-        raise ValueError(
-            f"News API error {response.status_code}: {response.text}"
-        )
-
-    data = response.json()
-    articles = data.get("articles", [])
+    })
 
     logger.info(f"Retrieved {len(articles)} raw articles from News API")
 
+    # 2️⃣ Fallback: keyword-based India query
+    if not articles:
+        logger.warning("country=in returned 0 articles, using fallback query")
+        articles = _fetch({
+            "q": "India",
+            "language": "en",
+            "sortBy": "publishedAt",
+            "pageSize": NEWS_PAGE_SIZE,
+            "apiKey": NEWS_API_KEY,
+        })
+
     cleaned = []
+
     for a in articles:
         article = {
             "title": a.get("title", ""),
@@ -73,6 +84,8 @@ def fetch_top_headlines() -> list[dict]:
             continue
         if not _is_recent(article["publishedAt"]):
             continue
+
+        # 🔹 soft India relevance (not strict)
         if not _is_india_relevant(article):
             continue
 
@@ -80,16 +93,26 @@ def fetch_top_headlines() -> list[dict]:
 
     logger.info(f"India + fresh articles after filter: {len(cleaned)}")
 
+    # 3️⃣ LAST RESORT: allow ANY fresh article (bot must run)
+    if not cleaned and articles:
+        logger.warning("No India-filtered articles, using fresh global fallback")
+        for a in articles:
+            if _is_recent(a.get("publishedAt", "")):
+                cleaned.append({
+                    "title": a.get("title", ""),
+                    "description": a.get("description", ""),
+                    "url": a.get("url", ""),
+                    "source": a.get("source", {}),
+                    "publishedAt": a.get("publishedAt", ""),
+                })
+
     if not cleaned:
-        raise ValueError("No recent India-relevant articles found")
+        raise ValueError("News API returned no usable articles")
 
     return cleaned
 
 
-def select_big_and_supporting_stories(
-    articles: list[dict],
-) -> tuple[dict, list[dict]]:
-
+def select_big_and_supporting_stories(articles: list[dict]):
     articles = sorted(
         articles,
         key=lambda x: x.get("publishedAt", ""),
