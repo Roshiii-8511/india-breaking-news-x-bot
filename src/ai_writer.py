@@ -1,16 +1,13 @@
-# src/ai_writer.py
-# Replace your current ai_writer with this file.
-
 """
-AI tweet writer (Gemini preferred). If Gemini fails, build a deterministic
-5-tweet thread directly from the article fields so posts stay relevant.
+AI Tweet writer using Gemini 2.5 Flash via REST API.
+No SDK required → 100% stable in GitHub Actions.
 """
 
 import logging
 import re
+import requests
 from typing import List, Dict, Optional
 from datetime import datetime
-from google import genai
 
 from src.config import (
     GEMINI_API_KEY,
@@ -21,204 +18,145 @@ from src.config import (
 
 logger = logging.getLogger(__name__)
 
-# Try to init genai client (some SDKs use genai.Client or genai.configure)
-client = None
-try:
-    # Preferred new pattern (if present)
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    logger.info("Initialized genai.Client")
-except Exception:
-    try:
-        # Older pattern (some installs)
-        genai.configure(api_key=GEMINI_API_KEY)  # may raise AttributeError if not present
-        client = genai
-        logger.info("Initialized genai via genai.configure")
-    except Exception as e:
-        logger.warning("Gemini client init failed: %s", e)
-        client = None
+GEMINI_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+)
 
 MAX_TWEET_CHARS = 260
 
 
 def _clean_spaces(text: str) -> str:
-    if not text:
-        return ""
-    return re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"\s+", " ", text or "").strip()
 
 
 def truncate(text: Optional[str], limit: int = MAX_TWEET_CHARS) -> str:
     if not text:
         return ""
     t = re.sub(r"<[^>]+>", "", text).strip()
-    return t if len(t) <= limit else t[: limit - 3].rstrip() + "..."
+    return t if len(t) <= limit else t[: limit - 3] + "..."
 
 
-def _split_tweets_from_response(content: str, expected_count: int = 5) -> List[str]:
-    if not content:
-        return []
+def _split_tweets(content: str, expected_count: int) -> List[str]:
     parts = re.split(r"\n\s*---\s*\n", content.strip())
-    cleaned = []
+    out = []
     for p in parts:
         txt = re.sub(r"^Tweet\s*\d+:\s*", "", p, flags=re.IGNORECASE)
-        txt = re.sub(r"^\d+\.\s*", "", txt)
         txt = _clean_spaces(txt)
         txt = truncate(txt)
         if txt:
-            cleaned.append(txt)
-    while len(cleaned) < expected_count:
-        cleaned.append(truncate("More updates on this story soon. #India #News"))
-    return cleaned[:expected_count]
+            out.append(txt)
+    while len(out) < expected_count:
+        out.append(truncate("More updates soon. #India #News"))
+    return out[:expected_count]
 
 
-def _call_gemini_try_variants(prompt: str, max_output_tokens: int = 300, temperature: float = 0.7) -> str:
+# === NEW: REST API CALL (WORKS 100% WITH GEMINI 2.5 FLASH) ==================
+
+def call_gemini(prompt: str, max_tokens: int) -> str:
     """
-    Try to call Gemini in several ways depending on installed SDK.
-    If all attempts fail, raise Exception.
+    Direct REST API call to Gemini 2.5 Flash.
+    Never depends on buggy Python SDKs.
     """
-    if client is None:
-        raise RuntimeError("Gemini client not initialized")
+    payload = {
+        "contents": [
+            {"parts": [{"text": prompt}]}
+        ],
+        "generationConfig": {
+            "maxOutputTokens": max_tokens,
+            "temperature": 0.7
+        }
+    }
 
-    last_err = None
+    r = requests.post(GEMINI_URL, json=payload, timeout=20)
 
-    # Attempt 1: client.models.generate_content (new SDK style)
+    if r.status_code != 200:
+        raise RuntimeError(f"Gemini API error {r.status_code}: {r.text}")
+
+    data = r.json()
+
     try:
-        logger.info("Attempting client.models.generate_content(model=%s)", GEMINI_MODEL)
-        resp = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            max_output_tokens=max_output_tokens,
-            temperature=temperature,
-        )
-        # try to extract textual output in common places:
-        if hasattr(resp, "text") and resp.text:
-            return resp.text
-        # some responses have .output or .candidates:
-        if hasattr(resp, "output") and resp.output:
-            parts = []
-            for part in resp.output:
-                if hasattr(part, "content") and part.content:
-                    parts.append(part.content)
-                elif hasattr(part, "text") and part.text:
-                    parts.append(part.text)
-            if parts:
-                return "\n".join(parts)
-    except Exception as e:
-        logger.warning("client.models.generate_content failed: %s", e)
-        last_err = e
-
-    # Attempt 2: client.generate_text (some older helpers)
-    try:
-        logger.info("Attempting client.generate_text(model=%s)", GEMINI_MODEL)
-        resp = client.generate_text(
-            model=GEMINI_MODEL,
-            prompt=prompt,
-            max_output_tokens=max_output_tokens,
-            temperature=temperature,
-        )
-        if hasattr(resp, "text") and resp.text:
-            return resp.text
-    except Exception as e:
-        logger.debug("client.generate_text failed: %s", e)
-        last_err = e
-
-    # Attempt 3: client.generate_content (alternate)
-    try:
-        logger.info("Attempting client.generate_content(model=%s)", GEMINI_MODEL)
-        resp = client.generate_content(
-            model=GEMINI_MODEL,
-            prompt=prompt,
-            max_output_tokens=max_output_tokens,
-            temperature=temperature,
-        )
-        if hasattr(resp, "text") and resp.text:
-            return resp.text
-    except Exception as e:
-        logger.debug("client.generate_content failed: %s", e)
-        last_err = e
-
-    # nothing worked
-    logger.error("All Gemini generation attempts failed. Last error: %s", last_err)
-    raise last_err or Exception("Gemini generation failed (unknown reason)")
-
-
-def _build_thread_from_article(big_story: Dict) -> List[str]:
-    """
-    Build a deterministic 5-tweet thread using article fields when LLM is unavailable.
-    This ensures the bot posts real news content even if AI fails.
-    """
-    title = big_story.get("title", "") or ""
-    description = big_story.get("description", "") or ""
-    url = big_story.get("url", "") or ""
-    source = (big_story.get("source") or {}).get("name", "") or ""
-    published = big_story.get("publishedAt", "") or ""
-
-    # Format publishedAt into readable (try ISO parse)
-    try:
-        dt = datetime.fromisoformat(published.replace("Z", "+00:00"))
-        published_str = dt.strftime("%d %b %Y %H:%M UTC")
+        return data["candidates"][0]["content"]["parts"][0]["text"]
     except Exception:
-        published_str = published
-
-    t1 = truncate(f"🔔 BREAKING: {title} ({source})")
-    t2 = truncate(f"Summary: {description}"[:MAX_TWEET_CHARS])
-    t3 = truncate(f"Source: {source} · Published: {published_str}")
-    t4 = truncate(f"More: {url}") if url else truncate("More updates coming as we verify sources.")
-    t5 = truncate("Follow for verified updates. Reply with trusted source links and we'll review them. #India #News")
-
-    return [t1, t2, t3, t4, t5]
+        raise RuntimeError(f"Unexpected Gemini response: {data}")
 
 
-def generate_thread_for_big_story(big_story: Dict) -> List[str]:
-    """
-    Try Gemini generation, on fail build deterministic article thread.
-    """
-    logger.info("Generating 5-tweet thread for: %s...", (big_story.get("title") or "")[:100])
+# === FALLBACK THREAD (if Gemini fails) =======================================
 
-    # Prepare system+user style prompt (LLM-friendly)
-    system_prompt = (
-        "You are an assistant that writes concise, accurate X (Twitter) threads about India news.\n"
-        "- Tone: neutral, factual, non-inflammatory.\n"
-        "- Output exactly 5 tweets separated by a line '---'.\n"
-        "- Keep each tweet <280 characters.\n"
-    )
-    user_prompt = (
-        f"Title: {big_story.get('title','')}\n"
-        f"Description: {big_story.get('description','')}\n"
-        f"Source: {(big_story.get('source') or {}).get('name','')}\n"
-        f"Published at: {big_story.get('publishedAt','')}\n"
-        f"URL: {big_story.get('url','')}\n\n"
-        "Write 5 tweets (hook, background, facts, impact, conclusion) separated by a line '---'."
-    )
-    prompt = system_prompt + "\n\n" + user_prompt
+def fallback_thread(article: Dict) -> List[str]:
+    title = article.get("title", "")
+    desc = article.get("description", "")
+    url = article.get("url", "")
+    src = (article.get("source") or {}).get("name", "")
+    pub = article.get("publishedAt", "")
 
-    # Try LLM
     try:
-        text = _call_gemini_try_variants(prompt, max_output_tokens=GEMINI_MAX_TOKENS_THREAD, temperature=0.65)
-        tweets = _split_tweets_from_response(text, expected_count=5)
-        logger.info("Generated %d tweets via Gemini", len(tweets))
+        dt = datetime.fromisoformat(pub.replace("Z", "+00:00"))
+        pub = dt.strftime("%d %b %Y %H:%M UTC")
+    except:
+        pass
+
+    return [
+        truncate(f"🔔 BREAKING: {title} ({src})"),
+        truncate(f"Summary: {desc}"),
+        truncate(f"Source: {src} · Published: {pub}"),
+        truncate(f"More: {url}" if url else "More updates soon."),
+        truncate("Follow for verified updates. #India #News"),
+    ]
+
+
+# === MAIN BIG STORY THREAD =====================================================
+
+def generate_thread_for_big_story(article: Dict) -> List[str]:
+    logger.info("Generating thread via Gemini REST API…")
+
+    system = (
+        "You are an assistant writing factual India-focused X threads.\n"
+        "- Keep tweets <280 chars.\n"
+        "- Output exactly 5 tweets separated by '---'.\n"
+        "- Neutral, factual, verified tone.\n"
+    )
+
+    user = (
+        f"Title: {article.get('title','')}\n"
+        f"Description: {article.get('description','')}\n"
+        f"Source: {(article.get('source') or {}).get('name','')}\n"
+        f"Published: {article.get('publishedAt','')}\n"
+        f"URL: {article.get('url','')}\n\n"
+        "Write 5 tweets separated by '---'."
+    )
+
+    prompt = system + "\n\n" + user
+
+    try:
+        raw = call_gemini(prompt, GEMINI_MAX_TOKENS_THREAD)
+        tweets = _split_tweets(raw, 5)
+        logger.info("Gemini thread generated.")
         return tweets
+
     except Exception as e:
-        logger.error("Gemini generation failed: %s", e)
-        logger.info("Falling back to deterministic article-based thread")
-        return _build_thread_from_article(big_story)
+        logger.error("Gemini failed → using fallback. %s", e)
+        return fallback_thread(article)
 
 
-def generate_short_tweets_for_supporting_stories(supporting_stories: List[Dict], max_tweets: int = 2) -> List[str]:
-    if not supporting_stories or max_tweets <= 0:
+# === SUPPORTING STORIES ========================================================
+
+def generate_short_tweets_for_supporting_stories(stories: List[Dict], max_tweets: int = 2) -> List[str]:
+    if not stories:
         return []
-    # Try LLM similarly but fall back to simple headlines
+
+    story_block = ""
+    for s in stories[:max_tweets]:
+        story_block += f"- {s.get('title','')} | {s.get('description','')}\n"
+
+    prompt = (
+        "Write one short tweet per story below. Neutral tone. < 280 chars. "
+        "Separate tweets with '---'.\n\n" + story_block
+    )
+
     try:
-        block = []
-        for i, s in enumerate(supporting_stories[:max_tweets], start=1):
-            block.append(f"{i}) {s.get('title','')}\n{s.get('description','')}\nSource:{(s.get('source') or {}).get('name','')}")
-        prompt = "Write one short tweet for each story below, 1-2 hashtags, neutral tone, separated with '---'.\n\n" + "\n\n".join(block)
-        text = _call_gemini_try_variants(prompt, max_output_tokens=GEMINI_MAX_TOKENS_SHORT, temperature=0.6)
-        tweets = _split_tweets_from_response(text, expected_count=max_tweets)
-        return tweets
-    except Exception as e:
-        logger.error("Gemini short tweets failed: %s", e)
-        # Fallback: headlines only
-        out = []
-        for s in supporting_stories[:max_tweets]:
-            out.append(truncate(f"{s.get('title','')} — {(s.get('source') or {}).get('name','')}"))
-        return out
+        raw = call_gemini(prompt, GEMINI_MAX_TOKENS_SHORT)
+        return _split_tweets(raw, max_tweets)
+    except:
+        # fallback: raw headlines
+        return [truncate(s.get("title", "")) for s in stories[:max_tweets]]
