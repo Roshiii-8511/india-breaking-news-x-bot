@@ -2,4 +2,3 @@ requests
 google-cloud-firestore
 google-auth
 python-dotenv
-google-genai>=0.1.0
