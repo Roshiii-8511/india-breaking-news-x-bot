@@ -1,4 +1,2 @@
 requests
 google-cloud-firestore
-google-auth
-python-dotenv
